@@ -1,0 +1,126 @@
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return request.auth != null
+        && exists(
+          /databases/$(database)/documents/admins/$(request.auth.uid)
+        );
+    }
+
+    match /users/{userId} {
+
+      allow create: if isOwner(userId)
+        && request.resource.data.keys().hasAll([
+          'fullName',
+          'email',
+          'role',
+          'createdAt',
+          'verificationStatus'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'fullName',
+          'email',
+          'role',
+          'createdAt',
+          'verificationStatus'
+        ])
+        && request.resource.data.fullName is string
+        && request.resource.data.email is string
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role in ['patient', 'doctor']
+        && request.resource.data.createdAt is string
+        && (
+          (
+            request.resource.data.role == 'doctor'
+            && request.resource.data.verificationStatus == 'pending'
+          )
+          ||
+          (
+            request.resource.data.role == 'patient'
+            && request.resource.data.verificationStatus == 'not_required'
+          )
+        );
+
+      // Users can read their own profile.
+      allow read: if isOwner(userId);
+
+      // Admins can read user records for dashboard management.
+      allow read: if isAdmin();
+
+      // Users can update only the permitted profile fields.
+      allow update: if isOwner(userId)
+        && request.resource.data.diff(resource.data)
+          .affectedKeys().hasOnly([
+            'fullName',
+            'professionalType',
+            'gender',
+            'phone',
+            'registrationNumber',
+            'qualification',
+            'institution',
+            'qualificationYear',
+            'specialization',
+            'experience',
+            'workplace',
+            'practiceLocation',
+            'verificationSubmittedAt'
+          ])
+        && (
+          !request.resource.data.diff(resource.data)
+            .affectedKeys().hasAny(['professionalType'])
+          || request.resource.data.professionalType in ['doctor', 'midwife']
+        )
+        && (
+          !request.resource.data.diff(resource.data)
+            .affectedKeys().hasAny(['verificationSubmittedAt'])
+          || request.resource.data.verificationSubmittedAt is string
+        );
+
+      // Admins can change only a doctor's verification status.
+      allow update: if isAdmin()
+        && resource.data.role == 'doctor'
+        && request.resource.data.diff(resource.data)
+          .affectedKeys().hasOnly(['verificationStatus'])
+        && request.resource.data.verificationStatus
+          in ['approved', 'rejected'];
+
+      allow delete: if false;
+    }
+
+    
+    match /admins/{adminId} {
+      allow read: if request.auth != null
+        && request.auth.uid == adminId;
+
+      // Admin documents must be managed through a trusted process.
+      allow write: if false;
+    }
+
+        match /publicDoctors/{doctorId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /doctorAvailability/{doctorId} {
+      // Patients and other visitors can read availability for booking.
+      allow read: if true;
+
+      // Only the doctor who owns this document or an admin can write it.
+      allow create, update: if isOwner(doctorId) || isAdmin();
+
+      allow delete: if isAdmin();
+    }
+  }
+}
